@@ -50,36 +50,37 @@ type GitHookSpec struct {
 
 	// ServiceAccountName K8s 服务账户名称
 	// +optional
-	ServiceAccountName string
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 
 	// ProjectURL Git 项目地址
 	// +kubebuilder:validation:MinLength=1
-	ProjectURL string
+	ProjectURL string `json:"projectUrl"`
 
 	// GitProvider Git 仓库类型
-	GitProvider string
+	GitProvider string `json:"gitProvider"`
 
 	// EventTypes 从 Gogs 接收的事件类型
-	EventTypes []gitEvent
+	EventTypes []gitEvent `json:"eventTypes"`
 
 	// AccessToken Gogs 的 access token，保存在 Kubernetes Secret 中
-	AccessToken SecretValueFromSource
+	AccessToken SecretValueFromSource `json:"accessToken"`
 
 	// SecretToken Gogs 的 secret token，保存在 Kubernetes Secret 中
-	SecretToken SecretValueFromSource
+	SecretToken SecretValueFromSource `json:"secretToken"`
 
 	// SSLVerify 触发 hook 时是否执行 SSL 验证
 	// +optional
-	SSLVerify bool
+	SSLVerify bool `json:"sslVerify,omitempty"`
 
 	// RunSpec 事件触发时要运行的 tekton pipelinerun spec
-	RunSpec tektonv1alpha.PipelineRunSpec
+	RunSpec tektonv1alpha.PipelineRunSpec `json:"runSpec"`
 }
 
 // GitHookStatus defines the observed state of GitHook
 type GitHookStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+
 }
 
 // +kubebuilder:object:root=true
