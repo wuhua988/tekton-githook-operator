@@ -16,6 +16,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	tektonv1alpha1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -73,7 +74,7 @@ type GitHookSpec struct {
 	SSLVerify bool `json:"sslVerify,omitempty"`
 
 	// RunSpec 事件触发时要运行的 tekton pipelinerun spec
-	RunSpec tektonv1alpha.PipelineRunSpec `json:"runSpec"`
+	RunSpec tektonv1alpha1.PipelineRunSpec `json:"runSpec"`
 }
 
 // GitHookStatus defines the observed state of GitHook
