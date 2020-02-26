@@ -81,6 +81,8 @@ type GitHookStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
+	// ID Gogs 项目 hook id
+	ID string `json:"Id,omitempty"`
 }
 
 // +kubebuilder:object:root=true
