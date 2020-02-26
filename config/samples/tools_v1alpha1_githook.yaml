@@ -1,0 +1,7 @@
+apiVersion: tools.github.com/zhd173/v1alpha1
+kind: GitHook
+metadata:
+  name: githook-sample
+spec:
+  # Add fields here
+  foo: bar

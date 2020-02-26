@@ -1,0 +1,7 @@
+version: "2"
+domain: github.com/zhd173
+repo: github.com/zhd173/githook
+resources:
+- group: tools
+  version: v1alpha1
+  kind: GitHook
