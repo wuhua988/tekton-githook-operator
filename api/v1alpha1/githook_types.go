@@ -16,18 +16,64 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
+// SecretValueFromSource Secret 来源
+type SecretValueFromSource struct {
+	// 选择的密钥
+	SecretKeyRef *corev1.SecretKeySelector `json:"SecretKeyRef,omitempty"`
+}
+
+// +kubebuilder:validation:Enum=gitlab;github;gogs
+
+// GitProvider Git 仓库类型
+type GitProvider string
+
+var (
+	Gitlab GitProvider = "gitlab"
+	Github GitProvider = "github"
+	Gogs   GitProvider = "gogs"
+)
+
+// +kubebuilder:validation:Enum=create;delete;fork;push;issues;issue_comment;pull_request;release
+type gitEvent string
+
 // GitHookSpec defines the desired state of GitHook
 type GitHookSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
+	// ServiceAccountName K8s 服务账户名称
+	// +optional
 	ServiceAccountName string
+
+	// ProjectURL Git 项目地址
+	// +kubebuilder:validation:MinLength=1
+	ProjectURL string
+
+	// GitProvider Git 仓库类型
+	GitProvider string
+
+	// EventTypes 从 Gogs 接收的事件类型
+	EventTypes []gitEvent
+
+	// AccessToken Gogs 的 access token，保存在 Kubernetes Secret 中
+	AccessToken SecretValueFromSource
+
+	// SecretToken Gogs 的 secret token，保存在 Kubernetes Secret 中
+	SecretToken SecretValueFromSource
+
+	// SSLVerify 触发 hook 时是否执行 SSL 验证
+	// +optional
+	SSLVerify bool
+
+	// RunSpec 事件触发时要运行的 tekton pipelinerun spec
+	RunSpec tektonv1alpha.PipelineRunSpec
 }
 
 // GitHookStatus defines the observed state of GitHook
