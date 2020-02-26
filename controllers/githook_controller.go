@@ -19,6 +19,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -32,7 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	servinv1alpha1 "github.com/knative/serving/pkg/apis/serving/v1alpha1"
-	toolsv1alpha1 "github.com/zhd173/githook/api/v1alpha1"
+	"github.com/zhd173/githook/api/v1alpha1"
+	"github.com/zhd173/githook/pkg/model"
 )
 
 const (
@@ -53,7 +56,7 @@ func (r *GitHookReconciler) requestLogger(req ctrl.Request) logr.Logger {
 	return r.Log.WithName(req.NamespacedName.String())
 }
 
-func (r *GitHookReconciler) sourceLogger(source *toolsv1alpha1.GitHook) logr.Logger {
+func (r *GitHookReconciler) sourceLogger(source *v1alpha1.GitHook) logr.Logger {
 	return r.Log.WithName(fmt.Sprintf("%s/%s", source.Namespace, source.Name))
 }
 
@@ -79,7 +82,7 @@ func (r *GitHookReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	log.Info("Reconciling" + req.NamespacedName.String())
 
 	// Fetch the GitHook instance
-	sourceOrg := &toolsv1alpha1.GitHook{}
+	sourceOrg := &v1alpha1.GitHook{}
 	err := r.Get(context.Background(), req.NamespacedName, sourceOrg)
 	if err != nil {
 		// requeue the request
@@ -91,11 +94,11 @@ func (r *GitHookReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	var reconcileErr error
 	if sourceOrg.ObjectMeta.DeletionTimestamp == nil {
 		// 新建、更新
-		reconcileErr = r.reconcile(source.(*toolsv1alpha1.GitHook))
+		reconcileErr = r.reconcile(source.(*v1alpha1.GitHook))
 	} else {
 		// 删除：通过 DeletionTimestamp != nil 判定是否删除，调用 finalize 方法删除依赖资源
-		if r.hasFinalizer(source.(*toolsv1alpha1.GitHook).Finalizers) {
-			reconcileErr = r.finalize(source.(*toolsv1alpha1.GitHook))
+		if r.hasFinalizer(source.(*v1alpha1.GitHook).Finalizers) {
+			reconcileErr = r.finalize(source.(*v1alpha1.GitHook))
 		}
 	}
 
@@ -109,19 +112,25 @@ func (r *GitHookReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 }
 
 // 新建、更新逻辑
-func (r *GitHookReconciler) reconcile(source *toolsv1alpha1.GitHook) error {
+func (r *GitHookReconciler) reconcile(source *v1alpha1.GitHook) error {
 	log := r.sourceLogger(source)
+
 	ksvc, err := r.reconcileWebhookService(source)
 	if err != nil {
 		return err
 	}
 
 	// 使用 Knative Service URL 注册 git webhook，并保存返回的 ID
+	hookOptions, err := r.buildHookFromSource(source)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
 // 调和 Knative Service，不存在则创建，否则更新
-func (r *GitHookReconciler) reconcileWebhookService(source *toolsv1alpha1.GitHook) (*servinv1alpha1.Service, error) {
+func (r *GitHookReconciler) reconcileWebhookService(source *v1alpha1.GitHook) (*servinv1alpha1.Service, error) {
 	log := r.sourceLogger(source)
 
 	desiredKsvc, err := r.generateKnativeServiceObject(source, r.WebhookImage)
@@ -173,7 +182,7 @@ func (r *GitHookReconciler) reconcileWebhookService(source *toolsv1alpha1.GitHoo
 }
 
 // 生成期望 Knative Service 对象
-func (r *GitHookReconciler) generateKnativeServiceObject(source *toolsv1alpha1.GitHook, receiveAdapterImage string) (*servinv1alpha1.Service, error) {
+func (r *GitHookReconciler) generateKnativeServiceObject(source *v1alpha1.GitHook, receiveAdapterImage string) (*servinv1alpha1.Service, error) {
 	labels := map[string]string{
 		"receive-adapter": source.Name,
 	}
@@ -235,7 +244,7 @@ var (
 )
 
 // 获取旧的 Knative Service
-func (r *GitHookReconciler) getOwnedKnativeService(source *toolsv1alpha1.GitHook) (*servinv1alpha1.Service, error) {
+func (r *GitHookReconciler) getOwnedKnativeService(source *v1alpha1.GitHook) (*servinv1alpha1.Service, error) {
 	ctx := context.Background()
 
 	list := &servinv1alpha1.ServiceList{}
@@ -250,7 +259,7 @@ func (r *GitHookReconciler) getOwnedKnativeService(source *toolsv1alpha1.GitHook
 	return &list.Items[0], nil
 }
 
-func (r *GitHookReconciler) waitForKnativeServiceReady(source *toolsv1alpha1.GitHook) (*servinv1alpha1.Service, error) {
+func (r *GitHookReconciler) waitForKnativeServiceReady(source *v1alpha1.GitHook) (*servinv1alpha1.Service, error) {
 	for attempts := 0; attempts < 4; attempts++ {
 		ksvc, err := r.getOwnedKnativeService(source)
 		if err != nil {
@@ -266,8 +275,74 @@ func (r *GitHookReconciler) waitForKnativeServiceReady(source *toolsv1alpha1.Git
 	return nil, fmt.Errorf("Failed to get service to be in ready state")
 }
 
+func (r *GitHookReconciler) buildHookFromSource(source *v1alpha1.GitHook) (*model.HookOptions, error) {
+	hookOptions := &model.HookOptions{}
+
+	baseURL, owner, projectName, err := parseGitURL(source.Spec.ProjectURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to process project url to get the project name: " + err.Error())
+	}
+
+	hookOptions.BaseURL = baseURL
+	hookOptions.Project = projectName
+	hookOptions.Owner = owner
+	hookOptions.ID = source.Status.ID
+
+	for _, event := range source.Spec.EventTypes {
+		hookOptions.Events = append(hookOptions.Events, string(event))
+	}
+	hookOptions.AccessToken, err = r.secretFrom(source.Namespace, source.Spec.AccessToken.SecretKeyRef)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get accesstoken from secret %s/%s", source.Namespace, source.Spec.AccessToken.SecretKeyRef.Key)
+	}
+
+	hookOptions.SecretToken, err = r.secretFrom(source.Namespace, source.Spec.SecretToken.SecretKeyRef)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get secret token from secret %s/%s", source.Namespace, source.Spec.AccessToken.SecretKeyRef.Key)
+	}
+
+	return hookOptions, nil
+}
+
+func parseGitURL(gitURL string) (baseURL string, owner string, project string, err error) {
+	u, err := url.Parse(gitURL)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	paths := strings.Split(u.Path[1:], "/")
+	baseURL = fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+	owner = paths[0]
+	project = paths[1]
+
+	return baseURL, owner, project, nil
+}
+
+func (r *GitHookReconciler) getSecret(namespace string, secretKeySelector *corev1.SecretKeySelector) (*corev1.Secret, error) {
+	secret := &corev1.Secret{}
+	err := r.Get(context.TODO(), client.ObjectKey{Namespace: namespace, Name: secretKeySelector.Name}, secret)
+
+	return secret, err
+}
+
+func (r *GitHookReconciler) secretFrom(namespace string, secretKeySelector *corev1.SecretKeySelector) (string, error) {
+	secret, err := r.getSecret(namespace, secretKeySelector)
+
+	if err != nil {
+		return "", err
+	}
+	secretVal, ok := secret.Data[secretKeySelector.Key]
+	if !ok {
+		return "", fmt.Errorf(`key "%s" not found in secret "%s"`, secretKeySelector.Key, secretKeySelector.Name)
+	}
+
+	return string(secretVal), nil
+}
+
 // 删除逻辑
-func (r *GitHookReconciler) finalize(*toolsv1alpha1.GitHook) error {
+func (r *GitHookReconciler) finalize(*v1alpha1.GitHook) error {
 	return nil
 }
 
@@ -282,6 +357,6 @@ func (r *GitHookReconciler) hasFinalizer(finalizers []string) bool {
 
 func (r *GitHookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&toolsv1alpha1.GitHook{}).
+		For(&v1alpha1.GitHook{}).
 		Complete(r)
 }
