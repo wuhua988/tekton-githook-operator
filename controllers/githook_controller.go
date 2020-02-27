@@ -24,18 +24,20 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	servinv1alpha1 "github.com/knative/serving/pkg/apis/serving/v1alpha1"
 	servingv1beta1 "github.com/knative/serving/pkg/apis/serving/v1beta1"
+	"github.com/zhd173/githook/api/v1alpha1"
+	githookclient "github.com/zhd173/githook/pkg/client"
+	"github.com/zhd173/githook/pkg/githook"
+	"github.com/zhd173/githook/pkg/model"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	servinv1alpha1 "github.com/knative/serving/pkg/apis/serving/v1alpha1"
-	"github.com/zhd173/githook/api/v1alpha1"
-	"github.com/zhd173/githook/pkg/model"
 )
 
 const (
@@ -69,8 +71,8 @@ func ignoreNotFound(err error) error {
 
 // +kubebuilder:rbac:groups=tools.github.com/zhd173,resources=githooks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=tools.github.com/zhd173,resources=githooks/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=tools.pongzt.com,resources=githooks,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=tools.pongzt.com,resources=githooks/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=tools.github.com/zhd173,resources=githooks,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=tools.github.com/zhd173,resources=githooks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=eventing.knative.dev,resources=channels,verbs=get;list;watch
@@ -120,13 +122,70 @@ func (r *GitHookReconciler) reconcile(source *v1alpha1.GitHook) error {
 		return err
 	}
 
-	// 使用 Knative Service URL 注册 git webhook，并保存返回的 ID
 	hookOptions, err := r.buildHookFromSource(source)
 	if err != nil {
 		return err
 	}
 
+	// 使用 Knative Service URL 注册 git webhook，并保存返回的 ID
+	hookOptions.URL = getWebhookURL(source, ksvc)
+	hookID, err := r.reconcileWebhook(source, hookOptions)
+	if err != nil {
+		return err
+	}
+	source.Status.ID = hookID
+
+	log.Info("add finalizer to the source")
+	r.addFinalizer(source)
 	return nil
+}
+
+// 注册 git webhook
+func (r *GitHookReconciler) reconcileWebhook(source *v1alpha1.GitHook, hookOptions *model.HookOptions) (string, error) {
+	log := r.sourceLogger(source)
+
+	gitClient, err := getGitClient(source, hookOptions)
+
+	if err != nil {
+		return "", err
+	}
+
+	exists, changed, err := gitClient.Validate(hookOptions)
+
+	if err != nil {
+		return "", err
+	}
+
+	if !exists {
+		log.Info("create new webhook", "project", hookOptions.Project)
+		hookID, err := gitClient.Create(hookOptions)
+
+		if err != nil {
+			return "", err
+		}
+		log.Info("create new webhook successfully", "project", hookOptions.Project)
+		return hookID, err
+	}
+
+	if err != nil {
+		return "", err
+	}
+
+	if changed == true {
+		log.Info("update existing webhook", "project", hookOptions.Project)
+		hookID, err := gitClient.Update(hookOptions)
+
+		if err != nil {
+			return "", err
+		}
+
+		log.Info("update existing webhook successfully", "project", hookOptions.Project)
+
+		return hookID, nil
+	}
+
+	log.Info("webhook exists and updated", "project", hookOptions.Project)
+	return hookOptions.ID, nil
 }
 
 // 调和 Knative Service，不存在则创建，否则更新
@@ -341,6 +400,33 @@ func (r *GitHookReconciler) secretFrom(namespace string, secretKeySelector *core
 	return string(secretVal), nil
 }
 
+func (r *GitHookReconciler) addFinalizer(source *v1alpha1.GitHook) {
+	source.Finalizers = insertFinalizer(source.Finalizers)
+}
+
+func insertFinalizer(finalizers []string) []string {
+	set := sets.NewString(finalizers...)
+	set.Insert(finalizerName)
+	return set.List()
+}
+
+func getGitClient(source *v1alpha1.GitHook, options *model.HookOptions) (*githook.Client, error) {
+	var gitClient githook.GitClient
+
+	switch source.Spec.GitProvider {
+	case string(v1alpha1.Gogs):
+		gitClient = githookclient.NewGogsClient(options.BaseURL, options.AccessToken)
+	case string(v1alpha1.Github):
+		gitClient = githookclient.NewGithubClient(options.AccessToken)
+	case string(v1alpha1.Gitlab):
+		gitClient = githookclient.NewGitlabClient(options.BaseURL, options.AccessToken)
+	default:
+		return nil, fmt.Errorf("git provider %s not support", source.Spec.GitProvider)
+	}
+
+	return githook.New(gitClient, options.BaseURL, options.AccessToken)
+}
+
 // 删除逻辑
 func (r *GitHookReconciler) finalize(*v1alpha1.GitHook) error {
 	return nil
@@ -355,8 +441,28 @@ func (r *GitHookReconciler) hasFinalizer(finalizers []string) bool {
 	return false
 }
 
+// SetupWithManager setups controller with manager
 func (r *GitHookReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(&servinv1alpha1.Service{}, jobOwnerKey, func(rawObj runtime.Object) []string {
+		// grab the service object, extract the owner...
+		service := rawObj.(*servinv1alpha1.Service)
+		owner := metav1.GetControllerOf(service)
+		if owner == nil {
+			return nil
+		}
+		// ...make sure it's a CronJob...
+		if owner.Kind != "GitHook" {
+			return nil
+		}
+
+		// ...and if so, return it
+		return []string{owner.Name}
+	}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.GitHook{}).
+		Owns(&servinv1alpha1.Service{}).
 		Complete(r)
 }
